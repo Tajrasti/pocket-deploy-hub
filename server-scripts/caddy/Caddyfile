@@ -1,0 +1,40 @@
+# PhoneDeploy Caddyfile
+# Automatic HTTPS and reverse proxy configuration
+
+# Global options
+{
+    # Use HTTP only if you don't have a domain
+    # Remove this block for automatic HTTPS with a real domain
+    auto_https off
+}
+
+# Dashboard - change YOUR_DOMAIN to your actual domain or IP
+:80 {
+    # API proxy to webhook server
+    handle /api/* {
+        reverse_proxy localhost:3001
+    }
+    
+    # Webhook endpoint
+    handle /webhook {
+        reverse_proxy localhost:3001
+    }
+    
+    # Stats API
+    handle /stats* {
+        reverse_proxy localhost:3002
+    }
+    
+    # Serve the dashboard (if you want to host it locally)
+    # Uncomment and set the path to your built dashboard
+    # root * /home/user/phonedeploy/dashboard/dist
+    # file_server
+    
+    # Or proxy to the dashboard dev server
+    # reverse_proxy localhost:5173
+}
+
+# Example app configuration (added automatically by deploy.sh)
+# myapp.example.com {
+#     reverse_proxy localhost:3000
+# }
