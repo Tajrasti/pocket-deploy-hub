@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { motion } from "framer-motion";
 import { Search, Filter } from "lucide-react";
 import { Header } from "@/components/dashboard/Header";
@@ -8,90 +8,101 @@ import { TerminalLogs } from "@/components/dashboard/TerminalLogs";
 import { DeployModal, DeployConfig } from "@/components/dashboard/DeployModal";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { useToast } from "@/hooks/use-toast";
+import { toast } from "sonner";
 import type { App, BuildLog, SystemStats as SystemStatsType } from "@/types/deployment";
 
-// Mock data for demonstration
-const mockApps: App[] = [
-  {
-    id: "1",
-    name: "portfolio-site",
-    repo: "github.com/user/portfolio",
-    branch: "main",
-    status: "running",
-    domain: "portfolio.local:3001",
-    port: 3001,
-    lastDeployed: new Date(Date.now() - 3600000),
-    buildCommand: "npm run build",
-    startCommand: "npm start",
-    envVars: { NODE_ENV: "production" },
-  },
-  {
-    id: "2",
-    name: "api-server",
-    repo: "github.com/user/api",
-    branch: "develop",
-    status: "running",
-    domain: "api.local:3002",
-    port: 3002,
-    lastDeployed: new Date(Date.now() - 7200000),
-    buildCommand: "npm run build",
-    startCommand: "node dist/index.js",
-    envVars: { NODE_ENV: "production", DATABASE_URL: "***" },
-  },
-  {
-    id: "3",
-    name: "blog-frontend",
-    repo: "github.com/user/blog",
-    branch: "main",
-    status: "building",
-    domain: "blog.local:3003",
-    port: 3003,
-    lastDeployed: new Date(Date.now() - 86400000),
-    buildCommand: "npm run build",
-    startCommand: "npm start",
-    envVars: {},
-  },
-  {
-    id: "4",
-    name: "dashboard-app",
-    repo: "github.com/user/dashboard",
-    branch: "main",
-    status: "error",
-    domain: "dash.local:3004",
-    port: 3004,
-    lastDeployed: new Date(Date.now() - 172800000),
-    buildCommand: "npm run build",
-    startCommand: "npm start",
-    envVars: { API_KEY: "***" },
-  },
-];
-
-const mockLogs: BuildLog[] = [
-  { id: "1", appId: "1", timestamp: new Date(), message: "[PM2] Starting app...", type: "info" },
-  { id: "2", appId: "1", timestamp: new Date(), message: "[BUILD] Installing dependencies...", type: "info" },
-  { id: "3", appId: "1", timestamp: new Date(), message: "[BUILD] Running build command...", type: "info" },
-  { id: "4", appId: "1", timestamp: new Date(), message: "[BUILD] Build successful!", type: "success" },
-  { id: "5", appId: "1", timestamp: new Date(), message: "[PM2] App started on port 3001", type: "success" },
-  { id: "6", appId: "4", timestamp: new Date(), message: "[ERROR] Build failed: Cannot find module 'react'", type: "error" },
-];
-
-const mockStats: SystemStatsType = {
-  cpuUsage: 23.5,
-  memoryUsed: 136,
-  memoryTotal: 7680,
-  uptime: 432000,
-  activeApps: 2,
-};
+// Configure your server IP/hostname here
+const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3001";
+const STATS_API = import.meta.env.VITE_STATS_URL || "http://localhost:3002";
 
 export default function Index() {
-  const [apps, setApps] = useState<App[]>(mockApps);
-  const [logs] = useState<BuildLog[]>(mockLogs);
-  const [stats] = useState<SystemStatsType>(mockStats);
+  const [apps, setApps] = useState<App[]>([]);
+  const [logs, setLogs] = useState<BuildLog[]>([]);
+  const [stats, setStats] = useState<SystemStatsType>({
+    cpuUsage: 0,
+    memoryUsed: 0,
+    memoryTotal: 1,
+    uptime: 0,
+    activeApps: 0,
+  });
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedApp, setSelectedApp] = useState<App | null>(null);
   const [isDeployModalOpen, setIsDeployModalOpen] = useState(false);
-  const { toast } = useToast();
+  const [isLoading, setIsLoading] = useState(true);
+
+  // Fetch apps from backend
+  const fetchApps = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/apps`);
+      if (res.ok) {
+        const data = await res.json();
+        setApps(data.map((app: any) => ({
+          ...app,
+          lastDeployed: new Date(app.lastDeployed),
+          envVars: app.envVars || {}
+        })));
+      }
+    } catch (error) {
+      console.error("Failed to fetch apps:", error);
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  // Fetch system stats
+  const fetchStats = useCallback(async () => {
+    try {
+      const res = await fetch(`${STATS_API}/api/stats`);
+      if (res.ok) {
+        const data = await res.json();
+        setStats({
+          cpuUsage: data.cpuUsage,
+          memoryUsed: data.memoryUsed,
+          memoryTotal: data.memoryTotal,
+          uptime: data.uptime,
+          activeApps: data.activeApps,
+        });
+      }
+    } catch (error) {
+      console.error("Failed to fetch stats:", error);
+    }
+  }, []);
+
+  // Fetch logs for an app
+  const fetchLogs = useCallback(async (appId: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/apps/${appId}/logs`);
+      if (res.ok) {
+        const text = await res.text();
+        const logLines = text.split('\n').filter(Boolean).map((line, idx) => ({
+          id: `${appId}-${idx}`,
+          appId,
+          timestamp: new Date(),
+          message: line,
+          type: line.toLowerCase().includes('error') ? 'error' as const : 
+                line.toLowerCase().includes('success') || line.includes('Complete') ? 'success' as const :
+                line.toLowerCase().includes('warning') ? 'warning' as const : 'info' as const
+        }));
+        setLogs(logLines);
+      }
+    } catch (error) {
+      console.error("Failed to fetch logs:", error);
+    }
+  }, []);
+
+  // Initial load and polling
+  useEffect(() => {
+    fetchApps();
+    fetchStats();
+    
+    const appsInterval = setInterval(fetchApps, 5000);
+    const statsInterval = setInterval(fetchStats, 2000);
+    
+    return () => {
+      clearInterval(appsInterval);
+      clearInterval(statsInterval);
+    };
+  }, [fetchApps, fetchStats]);
 
   const filteredApps = apps.filter((app) =>
     app.name.toLowerCase().includes(searchQuery.toLowerCase())
@@ -99,72 +110,81 @@ export default function Index() {
 
   const handleViewLogs = (app: App) => {
     setSelectedApp(app);
+    fetchLogs(app.id);
   };
 
-  const handleToggleApp = (app: App) => {
-    setApps((prev) =>
-      prev.map((a) =>
-        a.id === app.id
-          ? { ...a, status: a.status === "running" ? "stopped" : "running" }
-          : a
-      )
-    );
-    toast({
-      title: app.status === "running" ? "App Stopped" : "App Started",
-      description: `${app.name} has been ${app.status === "running" ? "stopped" : "started"}.`,
-    });
+  const handleToggleApp = async (app: App) => {
+    const action = app.status === "running" ? "stop" : "start";
+    
+    try {
+      const res = await fetch(`${API_BASE}/api/apps/${app.id}/${action}`, {
+        method: "POST"
+      });
+      
+      if (res.ok) {
+        toast.success(`${app.name} ${action === "stop" ? "stopped" : "started"}`);
+        fetchApps();
+      } else {
+        toast.error(`Failed to ${action} ${app.name}`);
+      }
+    } catch (error) {
+      toast.error(`Failed to ${action} ${app.name}`);
+    }
   };
 
-  const handleRedeploy = (app: App) => {
-    setApps((prev) =>
-      prev.map((a) => (a.id === app.id ? { ...a, status: "building" } : a))
-    );
-    toast({
-      title: "Redeploying",
-      description: `${app.name} is being redeployed...`,
-    });
-    // Simulate build completion
-    setTimeout(() => {
-      setApps((prev) =>
-        prev.map((a) =>
-          a.id === app.id ? { ...a, status: "running", lastDeployed: new Date() } : a
-        )
-      );
-    }, 3000);
+  const handleRedeploy = async (app: App) => {
+    toast.info(`Redeploying ${app.name}...`);
+    
+    try {
+      const res = await fetch(`${API_BASE}/api/apps/${app.id}/redeploy`, {
+        method: "POST"
+      });
+      
+      if (res.ok) {
+        toast.success(`Redeployment started for ${app.name}`);
+        fetchApps();
+      } else {
+        toast.error(`Failed to redeploy ${app.name}`);
+      }
+    } catch (error) {
+      toast.error(`Failed to redeploy ${app.name}`);
+    }
   };
 
-  const handleDeploy = (config: DeployConfig) => {
-    const newApp: App = {
-      id: Date.now().toString(),
-      name: config.name,
-      repo: config.repo,
-      branch: config.branch,
-      status: "building",
-      domain: config.domain || `${config.name}.local:${config.port}`,
-      port: config.port,
-      lastDeployed: new Date(),
-      buildCommand: config.buildCommand,
-      startCommand: config.startCommand,
-      envVars: config.envVars,
-    };
-    setApps((prev) => [newApp, ...prev]);
-    toast({
-      title: "Deployment Started",
-      description: `${config.name} is being deployed...`,
-    });
-    // Simulate build completion
-    setTimeout(() => {
-      setApps((prev) =>
-        prev.map((a) => (a.id === newApp.id ? { ...a, status: "running" } : a))
-      );
-    }, 5000);
+  const handleDeploy = async (config: DeployConfig) => {
+    toast.info(`Deploying ${config.name}...`);
+    
+    try {
+      const res = await fetch(`${API_BASE}/api/apps`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: config.name,
+          repo: config.repo,
+          branch: config.branch,
+          buildCommand: config.buildCommand,
+          startCommand: config.startCommand,
+          port: config.port,
+          domain: config.domain,
+          envVars: config.envVars
+        })
+      });
+      
+      if (res.ok) {
+        toast.success(`Deployment started for ${config.name}`);
+        fetchApps();
+      } else {
+        toast.error(`Failed to deploy ${config.name}`);
+      }
+    } catch (error) {
+      toast.error(`Failed to deploy ${config.name}`);
+    }
   };
 
   const handleRefresh = () => {
-    toast({
-      title: "Refreshing",
-      description: "Fetching latest app status...",
-    });
+    fetchApps();
+    fetchStats();
+    toast.success("Refreshed");
   };
 
   return (
@@ -210,26 +230,38 @@ export default function Index() {
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {filteredApps.map((app, index) => (
-              <AppCard
-                key={app.id}
-                app={app}
-                index={index}
-                onViewLogs={handleViewLogs}
-                onToggleApp={handleToggleApp}
-                onRedeploy={handleRedeploy}
-              />
-            ))}
-          </div>
+          {isLoading ? (
+            <div className="text-muted-foreground text-center py-16">
+              Loading applications...
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {filteredApps.map((app, index) => (
+                <AppCard
+                  key={app.id}
+                  app={app}
+                  index={index}
+                  onViewLogs={handleViewLogs}
+                  onToggleApp={handleToggleApp}
+                  onRedeploy={handleRedeploy}
+                />
+              ))}
+            </div>
+          )}
 
-          {filteredApps.length === 0 && (
+          {!isLoading && filteredApps.length === 0 && (
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
-              className="text-center py-16 text-muted-foreground"
+              className="text-center py-16 text-muted-foreground border border-dashed border-border rounded-lg"
             >
-              <p>No apps found. Deploy your first app to get started!</p>
+              <p className="mb-4">No apps found. Deploy your first app to get started!</p>
+              <button
+                onClick={() => setIsDeployModalOpen(true)}
+                className="text-primary hover:underline"
+              >
+                Deploy your first app →
+              </button>
             </motion.div>
           )}
         </section>
