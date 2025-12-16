@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { GitBranch, ExternalLink, Play, Square, RotateCcw, Settings, Terminal } from "lucide-react";
+import { GitBranch, ExternalLink, Play, Square, RotateCcw, Terminal, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "./StatusBadge";
 import type { App } from "@/types/deployment";
@@ -11,9 +11,10 @@ interface AppCardProps {
   onViewLogs: (app: App) => void;
   onToggleApp: (app: App) => void;
   onRedeploy: (app: App) => void;
+  onDelete: (app: App) => void;
 }
 
-export function AppCard({ app, index, onViewLogs, onToggleApp, onRedeploy }: AppCardProps) {
+export function AppCard({ app, index, onViewLogs, onToggleApp, onRedeploy, onDelete }: AppCardProps) {
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
@@ -49,9 +50,15 @@ export function AppCard({ app, index, onViewLogs, onToggleApp, onRedeploy }: App
         <span className="px-2 py-1 bg-muted rounded text-muted-foreground">
           :{app.port}
         </span>
+        {app.domain && (
+          <>
+            <span className="text-muted-foreground">•</span>
+            <span className="text-primary/70 truncate max-w-[120px]">{app.domain}</span>
+          </>
+        )}
         <span className="text-muted-foreground">•</span>
         <span className="text-muted-foreground">
-          Deployed {formatDistanceToNow(app.lastDeployed, { addSuffix: true })}
+          {formatDistanceToNow(app.lastDeployed, { addSuffix: true })}
         </span>
       </div>
 
@@ -61,6 +68,7 @@ export function AppCard({ app, index, onViewLogs, onToggleApp, onRedeploy }: App
           size="sm"
           onClick={() => onToggleApp(app)}
           className="flex-1"
+          disabled={app.status === "building"}
         >
           {app.status === "running" ? (
             <>
@@ -77,6 +85,8 @@ export function AppCard({ app, index, onViewLogs, onToggleApp, onRedeploy }: App
           size="icon"
           onClick={() => onRedeploy(app)}
           className="text-muted-foreground hover:text-primary"
+          disabled={app.status === "building"}
+          title="Redeploy"
         >
           <RotateCcw className="w-4 h-4" />
         </Button>
@@ -85,8 +95,19 @@ export function AppCard({ app, index, onViewLogs, onToggleApp, onRedeploy }: App
           size="icon"
           onClick={() => onViewLogs(app)}
           className="text-muted-foreground hover:text-secondary"
+          title="View logs"
         >
           <Terminal className="w-4 h-4" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => onDelete(app)}
+          className="text-muted-foreground hover:text-destructive"
+          disabled={app.status === "building"}
+          title="Delete app"
+        >
+          <Trash2 className="w-4 h-4" />
         </Button>
       </div>
     </motion.div>
