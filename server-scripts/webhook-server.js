@@ -4,21 +4,64 @@
  */
 
 import http from 'http';
-import { createHmac } from 'crypto';
+import { createHmac, timingSafeEqual } from 'crypto';
 import { spawn, exec } from 'child_process';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, unlinkSync } from 'fs';
 import { join } from 'path';
 
 const PORT = process.env.WEBHOOK_PORT || 3001;
-const DEPLOY_DIR = process.env.DEPLOY_DIR || `/home/${process.env.USER}/phonedeploy`;
+const DEPLOY_DIR = process.env.DEPLOY_DIR || `/home/${process.env.USER || 'user'}/phonedeploy`;
 const CONFIG_FILE = join(DEPLOY_DIR, 'config', 'apps.json');
+const PORTS_FILE = join(DEPLOY_DIR, 'config', 'ports.json');
 const SECRET_FILE = join(DEPLOY_DIR, 'config', 'webhook-secret.txt');
 const LOGS_DIR = join(DEPLOY_DIR, 'logs');
+const APPS_DIR = join(DEPLOY_DIR, 'apps');
+const BASE_DOMAIN = process.env.BASE_DOMAIN || ''; // e.g., 'myserver.local'
 
 // Ensure directories exist
-[join(DEPLOY_DIR, 'config'), LOGS_DIR].forEach(dir => {
+[join(DEPLOY_DIR, 'config'), LOGS_DIR, APPS_DIR].forEach(dir => {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 });
+
+// Port management
+function loadPorts() {
+  if (!existsSync(PORTS_FILE)) {
+    writeFileSync(PORTS_FILE, JSON.stringify({ nextPort: 4000, allocated: {} }));
+  }
+  return JSON.parse(readFileSync(PORTS_FILE, 'utf8'));
+}
+
+function savePorts(ports) {
+  writeFileSync(PORTS_FILE, JSON.stringify(ports, null, 2));
+}
+
+function allocatePort(appId) {
+  const ports = loadPorts();
+  if (ports.allocated[appId]) return ports.allocated[appId];
+  
+  const port = ports.nextPort;
+  ports.allocated[appId] = port;
+  ports.nextPort = port + 1;
+  savePorts(ports);
+  return port;
+}
+
+function releasePort(appId) {
+  const ports = loadPorts();
+  if (ports.allocated[appId]) {
+    delete ports.allocated[appId];
+    savePorts(ports);
+  }
+}
+
+// Auto-generate domain from app name
+function generateDomain(appName) {
+  const slug = appName.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  if (BASE_DOMAIN) {
+    return `${slug}.${BASE_DOMAIN}`;
+  }
+  return `${slug}.localhost`;
+}
 
 // Load or create config
 function loadConfig() {
@@ -43,11 +86,16 @@ function getWebhookSecret() {
 // Verify GitHub webhook signature
 function verifySignature(payload, signature) {
   const secret = getWebhookSecret();
-  if (!secret) return true; // Skip verification if no secret
+  if (!secret) return true; // Skip verification if no secret configured
+  if (!signature) return false;
   
   const hmac = createHmac('sha256', secret);
   const digest = 'sha256=' + hmac.update(payload).digest('hex');
-  return signature === digest;
+  try {
+    return timingSafeEqual(Buffer.from(digest), Buffer.from(signature));
+  } catch {
+    return false;
+  }
 }
 
 // Deploy an application
@@ -63,34 +111,41 @@ function deployApp(app, callback) {
     saveConfig(config);
   }
   
-  const args = [
-    join(DEPLOY_DIR, 'deploy.sh'),
-    app.name || app.id,
-    app.repo,
-    app.branch || 'main',
-    app.buildCommand || 'npm install',
-    app.startCommand || 'npm start',
-    String(app.port || 3000),
-    app.domain || ''
-  ];
-  
   console.log(`[${timestamp}] Starting deployment: ${app.name}`);
   
-  const child = spawn('sh', args, {
+  const deployScript = join(DEPLOY_DIR, 'deploy.sh');
+  
+  const child = spawn('sh', [
+    deployScript,
+    app.id,
+    app.repo,
+    app.branch || 'main',
+    app.buildCommand || 'npm install && npm run build',
+    app.startCommand || 'npm start',
+    String(app.port),
+    app.domain || ''
+  ], {
     cwd: DEPLOY_DIR,
-    env: { ...process.env, ...app.envVars }
+    env: { 
+      ...process.env, 
+      ...app.envVars,
+      APP_ID: app.id,
+      APP_NAME: app.name,
+      DEPLOY_DIR: DEPLOY_DIR,
+      APPS_DIR: APPS_DIR
+    }
   });
   
   let output = '';
   
   child.stdout.on('data', (data) => {
     output += data.toString();
-    console.log(data.toString());
+    console.log(data.toString().trim());
   });
   
   child.stderr.on('data', (data) => {
     output += data.toString();
-    console.error(data.toString());
+    console.error(data.toString().trim());
   });
   
   child.on('close', (code) => {
@@ -103,44 +158,114 @@ function deployApp(app, callback) {
       saveConfig(finalConfig);
     }
     
+    // Write logs
+    try {
+      writeFileSync(logFile, output);
+    } catch (e) {
+      console.error('Failed to write log file:', e);
+    }
+    
     if (callback) callback(code === 0, output);
   });
 }
 
 // Stop an application
-function stopApp(appId, callback) {
-  exec(`pm2 stop ${appId}`, (error) => {
-    const config = loadConfig();
-    const idx = config.apps.findIndex(a => a.id === appId);
-    if (idx >= 0) {
-      config.apps[idx].status = 'stopped';
-      saveConfig(config);
-    }
-    if (callback) callback(!error);
+function stopApp(appId) {
+  return new Promise((resolve) => {
+    exec(`pm2 stop ${appId} 2>/dev/null || true`, (error) => {
+      const config = loadConfig();
+      const idx = config.apps.findIndex(a => a.id === appId);
+      if (idx >= 0) {
+        config.apps[idx].status = 'stopped';
+        saveConfig(config);
+      }
+      resolve(!error);
+    });
   });
 }
 
 // Start an application
-function startApp(appId, callback) {
-  exec(`pm2 start ${appId}`, (error) => {
-    const config = loadConfig();
-    const idx = config.apps.findIndex(a => a.id === appId);
-    if (idx >= 0) {
-      config.apps[idx].status = error ? 'error' : 'running';
-      saveConfig(config);
-    }
-    if (callback) callback(!error);
+function startApp(appId) {
+  return new Promise((resolve) => {
+    exec(`pm2 start ${appId} 2>/dev/null || pm2 restart ${appId}`, (error) => {
+      const config = loadConfig();
+      const idx = config.apps.findIndex(a => a.id === appId);
+      if (idx >= 0) {
+        config.apps[idx].status = error ? 'error' : 'running';
+        saveConfig(config);
+      }
+      resolve(!error);
+    });
   });
 }
 
-// Delete an application
-function deleteApp(appId, callback) {
-  exec(`pm2 delete ${appId}; rm -rf ${join(DEPLOY_DIR, 'apps', appId)}`, () => {
-    const config = loadConfig();
-    config.apps = config.apps.filter(a => a.id !== appId);
-    saveConfig(config);
-    if (callback) callback(true);
+// Delete an application completely
+function deleteApp(appId) {
+  return new Promise((resolve) => {
+    // Stop and delete from PM2
+    exec(`pm2 delete ${appId} 2>/dev/null || true`, () => {
+      // Remove app directory
+      const appDir = join(APPS_DIR, appId);
+      if (existsSync(appDir)) {
+        try {
+          rmSync(appDir, { recursive: true, force: true });
+        } catch (e) {
+          console.error(`Failed to remove app directory: ${e}`);
+        }
+      }
+      
+      // Remove log files
+      const logPatterns = [`${appId}-build.log`, `${appId}-error.log`, `${appId}-out.log`];
+      logPatterns.forEach(pattern => {
+        const logFile = join(LOGS_DIR, pattern);
+        if (existsSync(logFile)) {
+          try { unlinkSync(logFile); } catch {}
+        }
+      });
+      
+      // Release port
+      releasePort(appId);
+      
+      // Remove from config
+      const config = loadConfig();
+      config.apps = config.apps.filter(a => a.id !== appId);
+      saveConfig(config);
+      
+      // Update Caddy config
+      updateCaddyConfig();
+      
+      console.log(`App ${appId} deleted successfully`);
+      resolve(true);
+    });
   });
+}
+
+// Update Caddy reverse proxy config
+function updateCaddyConfig() {
+  const config = loadConfig();
+  const caddyDir = join(DEPLOY_DIR, 'caddy');
+  const caddyAppsFile = join(caddyDir, 'apps.conf');
+  
+  if (!existsSync(caddyDir)) {
+    mkdirSync(caddyDir, { recursive: true });
+  }
+  
+  let appsConfig = '# Auto-generated app configurations\n\n';
+  
+  config.apps.forEach(app => {
+    if (app.domain && app.port) {
+      appsConfig += `# ${app.name}\n`;
+      appsConfig += `${app.domain} {\n`;
+      appsConfig += `    reverse_proxy localhost:${app.port}\n`;
+      appsConfig += `    encode gzip\n`;
+      appsConfig += `}\n\n`;
+    }
+  });
+  
+  writeFileSync(caddyAppsFile, appsConfig);
+  
+  // Reload Caddy
+  exec(`caddy reload --config ${join(caddyDir, 'Caddyfile')} 2>/dev/null || true`);
 }
 
 // Get build logs
@@ -159,6 +284,11 @@ function setCORSHeaders(res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Hub-Signature-256');
 }
 
+function sendJSON(res, status, data) {
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(data));
+}
+
 // Request handler
 const server = http.createServer((req, res) => {
   setCORSHeaders(res);
@@ -175,16 +305,14 @@ const server = http.createServer((req, res) => {
   // Collect body
   let body = '';
   req.on('data', chunk => body += chunk);
-  req.on('end', () => {
+  req.on('end', async () => {
     
     // GitHub Webhook
     if (path === '/webhook' && req.method === 'POST') {
       const signature = req.headers['x-hub-signature-256'];
       
       if (!verifySignature(body, signature)) {
-        res.writeHead(401);
-        res.end(JSON.stringify({ error: 'Invalid signature' }));
-        return;
+        return sendJSON(res, 401, { error: 'Invalid signature' });
       }
       
       try {
@@ -201,115 +329,161 @@ const server = http.createServer((req, res) => {
         if (app && app.branch === branch) {
           console.log(`Webhook received for ${app.name}, deploying...`);
           deployApp(app);
-          res.writeHead(200);
-          res.end(JSON.stringify({ message: 'Deployment started' }));
+          return sendJSON(res, 200, { message: 'Deployment started', app: app.name });
         } else {
-          res.writeHead(200);
-          res.end(JSON.stringify({ message: 'No matching app found' }));
+          return sendJSON(res, 200, { message: 'No matching app found' });
         }
       } catch (e) {
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: 'Invalid payload' }));
+        return sendJSON(res, 400, { error: 'Invalid payload' });
       }
-      return;
     }
     
     // API: List apps
     if (path === '/api/apps' && req.method === 'GET') {
       const config = loadConfig();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(config.apps));
-      return;
+      return sendJSON(res, 200, config.apps);
     }
     
     // API: Deploy new app
     if (path === '/api/apps' && req.method === 'POST') {
       try {
-        const app = JSON.parse(body);
-        app.id = app.name.toLowerCase().replace(/[^a-z0-9]/g, '-');
-        app.status = 'building';
-        app.lastDeployed = new Date().toISOString();
+        const data = JSON.parse(body);
         
+        if (!data.name || !data.repo) {
+          return sendJSON(res, 400, { error: 'Name and repo are required' });
+        }
+        
+        const appId = data.name.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+        
+        // Check if app already exists
         const config = loadConfig();
-        config.apps = config.apps.filter(a => a.id !== app.id);
+        if (config.apps.find(a => a.id === appId)) {
+          return sendJSON(res, 400, { error: 'App with this name already exists' });
+        }
+        
+        // Auto-allocate port if not provided or 0
+        const port = data.port && data.port > 0 ? data.port : allocatePort(appId);
+        
+        // Auto-generate domain if not provided
+        const domain = data.domain && data.domain.trim() ? data.domain.trim() : generateDomain(data.name);
+        
+        const app = {
+          id: appId,
+          name: data.name,
+          repo: data.repo,
+          branch: data.branch || 'main',
+          status: 'building',
+          port,
+          domain,
+          buildCommand: data.buildCommand || 'npm install && npm run build',
+          startCommand: data.startCommand || 'npm start',
+          envVars: data.envVars || {},
+          lastDeployed: new Date().toISOString(),
+          createdAt: new Date().toISOString()
+        };
+        
         config.apps.push(app);
         saveConfig(config);
         
+        // Update Caddy config
+        updateCaddyConfig();
+        
+        // Start deployment
         deployApp(app, (success) => {
           console.log(`Deployment ${success ? 'succeeded' : 'failed'}: ${app.name}`);
         });
         
-        res.writeHead(202, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ message: 'Deployment started', app }));
+        return sendJSON(res, 202, { message: 'Deployment started', app });
       } catch (e) {
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: 'Invalid request body' }));
+        console.error('Deploy error:', e);
+        return sendJSON(res, 400, { error: 'Invalid request body' });
       }
-      return;
     }
     
-    // API: App actions (start/stop/redeploy/delete)
-    const appMatch = path.match(/^\/api\/apps\/([^/]+)\/?(start|stop|redeploy|logs)?$/);
+    // API: App actions
+    const appMatch = path.match(/^\/api\/apps\/([^/]+)(?:\/(start|stop|redeploy|logs))?$/);
     if (appMatch) {
       const appId = appMatch[1];
       const action = appMatch[2];
       
-      if (req.method === 'DELETE' || action === 'delete') {
-        deleteApp(appId, () => {
-          res.writeHead(200);
-          res.end(JSON.stringify({ message: 'App deleted' }));
-        });
-        return;
+      // DELETE app
+      if (req.method === 'DELETE' && !action) {
+        const config = loadConfig();
+        const app = config.apps.find(a => a.id === appId);
+        if (!app) {
+          return sendJSON(res, 404, { error: 'App not found' });
+        }
+        
+        await deleteApp(appId);
+        return sendJSON(res, 200, { message: 'App deleted successfully' });
       }
       
+      // GET single app
+      if (req.method === 'GET' && !action) {
+        const config = loadConfig();
+        const app = config.apps.find(a => a.id === appId);
+        if (!app) {
+          return sendJSON(res, 404, { error: 'App not found' });
+        }
+        return sendJSON(res, 200, app);
+      }
+      
+      // START app
       if (action === 'start' && req.method === 'POST') {
-        startApp(appId, (success) => {
-          res.writeHead(success ? 200 : 500);
-          res.end(JSON.stringify({ success }));
-        });
-        return;
+        const success = await startApp(appId);
+        const config = loadConfig();
+        const app = config.apps.find(a => a.id === appId);
+        return sendJSON(res, success ? 200 : 500, app || { error: 'Failed to start' });
       }
       
+      // STOP app
       if (action === 'stop' && req.method === 'POST') {
-        stopApp(appId, (success) => {
-          res.writeHead(success ? 200 : 500);
-          res.end(JSON.stringify({ success }));
-        });
-        return;
+        const success = await stopApp(appId);
+        const config = loadConfig();
+        const app = config.apps.find(a => a.id === appId);
+        return sendJSON(res, success ? 200 : 500, app || { error: 'Failed to stop' });
       }
       
+      // REDEPLOY app
       if (action === 'redeploy' && req.method === 'POST') {
         const config = loadConfig();
         const app = config.apps.find(a => a.id === appId);
         if (app) {
           deployApp(app);
-          res.writeHead(202);
-          res.end(JSON.stringify({ message: 'Redeployment started' }));
+          return sendJSON(res, 202, { message: 'Redeployment started', app });
         } else {
-          res.writeHead(404);
-          res.end(JSON.stringify({ error: 'App not found' }));
+          return sendJSON(res, 404, { error: 'App not found' });
         }
-        return;
       }
       
+      // GET logs
       if (action === 'logs' && req.method === 'GET') {
         const logs = getLogs(appId);
-        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.writeHead(200, { 
+          'Content-Type': 'text/plain',
+          'Access-Control-Allow-Origin': '*'
+        });
         res.end(logs);
         return;
       }
     }
     
+    // Webhook info
+    if (path === '/api/webhook-info' && req.method === 'GET') {
+      const host = req.headers.host || `localhost:${PORT}`;
+      return sendJSON(res, 200, {
+        webhookUrl: `http://${host}/webhook`,
+        secretConfigured: !!getWebhookSecret()
+      });
+    }
+    
     // Health check
     if (path === '/health') {
-      res.writeHead(200);
-      res.end(JSON.stringify({ status: 'ok', timestamp: new Date().toISOString() }));
-      return;
+      return sendJSON(res, 200, { status: 'ok', timestamp: new Date().toISOString() });
     }
     
     // 404
-    res.writeHead(404);
-    res.end(JSON.stringify({ error: 'Not found' }));
+    sendJSON(res, 404, { error: 'Not found' });
   });
 });
 

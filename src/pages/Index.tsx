@@ -10,6 +10,16 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import type { App, BuildLog, SystemStats as SystemStatsType } from "@/types/deployment";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 // Configure your server IP/hostname here
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3001";
@@ -29,6 +39,7 @@ export default function Index() {
   const [selectedApp, setSelectedApp] = useState<App | null>(null);
   const [isDeployModalOpen, setIsDeployModalOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [deleteApp, setDeleteApp] = useState<App | null>(null);
 
   // Fetch apps from backend
   const fetchApps = useCallback(async () => {
@@ -80,7 +91,7 @@ export default function Index() {
           timestamp: new Date(),
           message: line,
           type: line.toLowerCase().includes('error') ? 'error' as const : 
-                line.toLowerCase().includes('success') || line.includes('Complete') ? 'success' as const :
+                line.toLowerCase().includes('success') || line.includes('✓') || line.includes('Complete') ? 'success' as const :
                 line.toLowerCase().includes('warning') ? 'warning' as const : 'info' as const
         }));
         setLogs(logLines);
@@ -125,7 +136,8 @@ export default function Index() {
         toast.success(`${app.name} ${action === "stop" ? "stopped" : "started"}`);
         fetchApps();
       } else {
-        toast.error(`Failed to ${action} ${app.name}`);
+        const data = await res.json().catch(() => ({}));
+        toast.error(data.error || `Failed to ${action} ${app.name}`);
       }
     } catch (error) {
       toast.error(`Failed to ${action} ${app.name}`);
@@ -144,10 +156,34 @@ export default function Index() {
         toast.success(`Redeployment started for ${app.name}`);
         fetchApps();
       } else {
-        toast.error(`Failed to redeploy ${app.name}`);
+        const data = await res.json().catch(() => ({}));
+        toast.error(data.error || `Failed to redeploy ${app.name}`);
       }
     } catch (error) {
       toast.error(`Failed to redeploy ${app.name}`);
+    }
+  };
+
+  const handleDeleteApp = async () => {
+    if (!deleteApp) return;
+    
+    const appName = deleteApp.name;
+    
+    try {
+      const res = await fetch(`${API_BASE}/api/apps/${deleteApp.id}`, {
+        method: "DELETE"
+      });
+      
+      if (res.ok) {
+        toast.success(`${appName} deleted successfully`);
+        setDeleteApp(null);
+        fetchApps();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        toast.error(data.error || `Failed to delete ${appName}`);
+      }
+    } catch (error) {
+      toast.error(`Failed to delete ${appName}`);
     }
   };
 
@@ -171,10 +207,18 @@ export default function Index() {
       });
       
       if (res.ok) {
+        const data = await res.json();
         toast.success(`Deployment started for ${config.name}`);
+        if (data.app?.port) {
+          toast.info(`Assigned port: ${data.app.port}`);
+        }
+        if (data.app?.domain) {
+          toast.info(`Domain: ${data.app.domain}`);
+        }
         fetchApps();
       } else {
-        toast.error(`Failed to deploy ${config.name}`);
+        const data = await res.json().catch(() => ({}));
+        toast.error(data.error || `Failed to deploy ${config.name}`);
       }
     } catch (error) {
       toast.error(`Failed to deploy ${config.name}`);
@@ -244,6 +288,7 @@ export default function Index() {
                   onViewLogs={handleViewLogs}
                   onToggleApp={handleToggleApp}
                   onRedeploy={handleRedeploy}
+                  onDelete={setDeleteApp}
                 />
               ))}
             </div>
@@ -282,6 +327,27 @@ export default function Index() {
         onClose={() => setIsDeployModalOpen(false)}
         onDeploy={handleDeploy}
       />
+
+      {/* Delete Confirmation Dialog */}
+      <AlertDialog open={!!deleteApp} onOpenChange={() => setDeleteApp(null)}>
+        <AlertDialogContent className="bg-card border-border">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete {deleteApp?.name}?</AlertDialogTitle>
+            <AlertDialogDescription className="text-muted-foreground">
+              This will permanently delete the app, its files, and stop all running processes. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="border-border">Cancel</AlertDialogCancel>
+            <AlertDialogAction 
+              onClick={handleDeleteApp}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
