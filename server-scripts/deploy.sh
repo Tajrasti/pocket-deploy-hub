@@ -3,7 +3,7 @@
 
 set -e
 
-DEPLOY_DIR="${DEPLOY_DIR:-/home/$(whoami)/phonedeploy}"
+DEPLOY_DIR="${DEPLOY_DIR:-/home/$(whoami)/pocket-deploy-hub/server-scripts}"
 APPS_DIR="${APPS_DIR:-$DEPLOY_DIR/apps}"
 LOGS_DIR="$DEPLOY_DIR/logs"
 CONFIG_FILE="$DEPLOY_DIR/config/apps.json"
