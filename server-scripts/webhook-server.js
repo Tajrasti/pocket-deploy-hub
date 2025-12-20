@@ -18,6 +18,9 @@ const LOGS_DIR = join(DEPLOY_DIR, 'logs');
 const APPS_DIR = join(DEPLOY_DIR, 'apps');
 const BASE_DOMAIN = process.env.BASE_DOMAIN || ''; // e.g., 'myserver.local'
 
+// Track active build processes
+const activeBuilds = new Map();
+
 // Ensure directories exist
 [join(DEPLOY_DIR, 'config'), LOGS_DIR, APPS_DIR].forEach(dir => {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
@@ -25,14 +28,23 @@ const BASE_DOMAIN = process.env.BASE_DOMAIN || ''; // e.g., 'myserver.local'
 
 // Port management
 function loadPorts() {
-  if (!existsSync(PORTS_FILE)) {
-    writeFileSync(PORTS_FILE, JSON.stringify({ nextPort: 4000, allocated: {} }));
+  try {
+    if (!existsSync(PORTS_FILE)) {
+      writeFileSync(PORTS_FILE, JSON.stringify({ nextPort: 4000, allocated: {} }));
+    }
+    return JSON.parse(readFileSync(PORTS_FILE, 'utf8'));
+  } catch (e) {
+    console.error('Failed to load ports:', e);
+    return { nextPort: 4000, allocated: {} };
   }
-  return JSON.parse(readFileSync(PORTS_FILE, 'utf8'));
 }
 
 function savePorts(ports) {
-  writeFileSync(PORTS_FILE, JSON.stringify(ports, null, 2));
+  try {
+    writeFileSync(PORTS_FILE, JSON.stringify(ports, null, 2));
+  } catch (e) {
+    console.error('Failed to save ports:', e);
+  }
 }
 
 function allocatePort(appId) {
@@ -65,20 +77,33 @@ function generateDomain(appName) {
 
 // Load or create config
 function loadConfig() {
-  if (!existsSync(CONFIG_FILE)) {
-    writeFileSync(CONFIG_FILE, JSON.stringify({ apps: [] }));
+  try {
+    if (!existsSync(CONFIG_FILE)) {
+      writeFileSync(CONFIG_FILE, JSON.stringify({ apps: [] }));
+    }
+    return JSON.parse(readFileSync(CONFIG_FILE, 'utf8'));
+  } catch (e) {
+    console.error('Failed to load config:', e);
+    return { apps: [] };
   }
-  return JSON.parse(readFileSync(CONFIG_FILE, 'utf8'));
 }
 
 function saveConfig(config) {
-  writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+  try {
+    writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+  } catch (e) {
+    console.error('Failed to save config:', e);
+  }
 }
 
 // Load webhook secret
 function getWebhookSecret() {
-  if (existsSync(SECRET_FILE)) {
-    return readFileSync(SECRET_FILE, 'utf8').trim();
+  try {
+    if (existsSync(SECRET_FILE)) {
+      return readFileSync(SECRET_FILE, 'utf8').trim();
+    }
+  } catch (e) {
+    console.error('Failed to read webhook secret:', e);
   }
   return null;
 }
@@ -89,19 +114,50 @@ function verifySignature(payload, signature) {
   if (!secret) return true; // Skip verification if no secret configured
   if (!signature) return false;
   
-  const hmac = createHmac('sha256', secret);
-  const digest = 'sha256=' + hmac.update(payload).digest('hex');
   try {
+    const hmac = createHmac('sha256', secret);
+    const digest = 'sha256=' + hmac.update(payload).digest('hex');
     return timingSafeEqual(Buffer.from(digest), Buffer.from(signature));
   } catch {
     return false;
   }
 }
 
+// Cancel an ongoing build
+function cancelBuild(appId) {
+  const buildProcess = activeBuilds.get(appId);
+  if (buildProcess) {
+    console.log(`Cancelling build for ${appId}`);
+    buildProcess.kill('SIGTERM');
+    
+    // Force kill after 5 seconds if still running
+    setTimeout(() => {
+      if (activeBuilds.has(appId)) {
+        buildProcess.kill('SIGKILL');
+        activeBuilds.delete(appId);
+      }
+    }, 5000);
+    
+    // Update status
+    const config = loadConfig();
+    const idx = config.apps.findIndex(a => a.id === appId);
+    if (idx >= 0) {
+      config.apps[idx].status = 'stopped';
+      saveConfig(config);
+    }
+    
+    return true;
+  }
+  return false;
+}
+
 // Deploy an application
 function deployApp(app, callback) {
   const logFile = join(LOGS_DIR, `${app.id}-build.log`);
   const timestamp = new Date().toISOString();
+  
+  // Cancel any existing build for this app
+  cancelBuild(app.id);
   
   // Update status to building
   const config = loadConfig();
@@ -136,6 +192,9 @@ function deployApp(app, callback) {
     }
   });
   
+  // Track the build process
+  activeBuilds.set(app.id, child);
+  
   let output = '';
   
   child.stdout.on('data', (data) => {
@@ -148,12 +207,19 @@ function deployApp(app, callback) {
     console.error(data.toString().trim());
   });
   
-  child.on('close', (code) => {
+  child.on('close', (code, signal) => {
+    activeBuilds.delete(app.id);
+    
     const finalConfig = loadConfig();
     const idx = finalConfig.apps.findIndex(a => a.id === app.id);
     
     if (idx >= 0) {
-      finalConfig.apps[idx].status = code === 0 ? 'running' : 'error';
+      if (signal === 'SIGTERM' || signal === 'SIGKILL') {
+        finalConfig.apps[idx].status = 'stopped';
+        output += '\n[Build cancelled by user]';
+      } else {
+        finalConfig.apps[idx].status = code === 0 ? 'running' : 'error';
+      }
       finalConfig.apps[idx].lastDeployed = new Date().toISOString();
       saveConfig(finalConfig);
     }
@@ -165,7 +231,7 @@ function deployApp(app, callback) {
       console.error('Failed to write log file:', e);
     }
     
-    if (callback) callback(code === 0, output);
+    if (callback) callback(code === 0 && !signal, output);
   });
 }
 
@@ -202,6 +268,9 @@ function startApp(appId) {
 // Delete an application completely
 function deleteApp(appId) {
   return new Promise((resolve) => {
+    // Cancel any ongoing build
+    cancelBuild(appId);
+    
     // Stop and delete from PM2
     exec(`pm2 delete ${appId} 2>/dev/null || true`, () => {
       // Remove app directory
@@ -240,6 +309,31 @@ function deleteApp(appId) {
   });
 }
 
+// Update app configuration
+function updateApp(appId, updates) {
+  const config = loadConfig();
+  const idx = config.apps.findIndex(a => a.id === appId);
+  
+  if (idx < 0) return null;
+  
+  // Apply updates (excluding id, name, repo which shouldn't change)
+  const allowedFields = ['branch', 'buildCommand', 'startCommand', 'port', 'domain', 'envVars'];
+  allowedFields.forEach(field => {
+    if (updates[field] !== undefined) {
+      config.apps[idx][field] = updates[field];
+    }
+  });
+  
+  saveConfig(config);
+  
+  // Update Caddy if domain changed
+  if (updates.domain !== undefined) {
+    updateCaddyConfig();
+  }
+  
+  return config.apps[idx];
+}
+
 // Update Caddy reverse proxy config
 function updateCaddyConfig() {
   const config = loadConfig();
@@ -262,17 +356,25 @@ function updateCaddyConfig() {
     }
   });
   
-  writeFileSync(caddyAppsFile, appsConfig);
-  
-  // Reload Caddy
-  exec(`caddy reload --config ${join(caddyDir, 'Caddyfile')} 2>/dev/null || true`);
+  try {
+    writeFileSync(caddyAppsFile, appsConfig);
+    
+    // Reload Caddy
+    exec(`caddy reload --config ${join(caddyDir, 'Caddyfile')} 2>/dev/null || true`);
+  } catch (e) {
+    console.error('Failed to update Caddy config:', e);
+  }
 }
 
 // Get build logs
 function getLogs(appId) {
   const logFile = join(LOGS_DIR, `${appId}-build.log`);
-  if (existsSync(logFile)) {
-    return readFileSync(logFile, 'utf8');
+  try {
+    if (existsSync(logFile)) {
+      return readFileSync(logFile, 'utf8');
+    }
+  } catch (e) {
+    console.error('Failed to read logs:', e);
   }
   return '';
 }
@@ -334,6 +436,7 @@ const server = http.createServer((req, res) => {
           return sendJSON(res, 200, { message: 'No matching app found' });
         }
       } catch (e) {
+        console.error('Webhook error:', e);
         return sendJSON(res, 400, { error: 'Invalid payload' });
       }
     }
@@ -401,7 +504,7 @@ const server = http.createServer((req, res) => {
     }
     
     // API: App actions
-    const appMatch = path.match(/^\/api\/apps\/([^/]+)(?:\/(start|stop|redeploy|logs))?$/);
+    const appMatch = path.match(/^\/api\/apps\/([^/]+)(?:\/(start|stop|redeploy|logs|cancel))?$/);
     if (appMatch) {
       const appId = appMatch[1];
       const action = appMatch[2];
@@ -416,6 +519,23 @@ const server = http.createServer((req, res) => {
         
         await deleteApp(appId);
         return sendJSON(res, 200, { message: 'App deleted successfully' });
+      }
+      
+      // UPDATE app (PUT)
+      if (req.method === 'PUT' && !action) {
+        try {
+          const updates = JSON.parse(body);
+          const updatedApp = updateApp(appId, updates);
+          
+          if (!updatedApp) {
+            return sendJSON(res, 404, { error: 'App not found' });
+          }
+          
+          return sendJSON(res, 200, { message: 'App updated', app: updatedApp });
+        } catch (e) {
+          console.error('Update error:', e);
+          return sendJSON(res, 400, { error: 'Invalid request body' });
+        }
       }
       
       // GET single app
@@ -442,6 +562,16 @@ const server = http.createServer((req, res) => {
         const config = loadConfig();
         const app = config.apps.find(a => a.id === appId);
         return sendJSON(res, success ? 200 : 500, app || { error: 'Failed to stop' });
+      }
+      
+      // CANCEL build
+      if (action === 'cancel' && req.method === 'POST') {
+        const cancelled = cancelBuild(appId);
+        if (cancelled) {
+          return sendJSON(res, 200, { message: 'Build cancelled' });
+        } else {
+          return sendJSON(res, 400, { error: 'No active build to cancel' });
+        }
       }
       
       // REDEPLOY app

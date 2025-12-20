@@ -24,7 +24,8 @@ module.exports = {
       log_file: path.join(deployDir, 'logs', 'webhook.log'),
       error_file: path.join(deployDir, 'logs', 'webhook-error.log'),
       merge_logs: true,
-      time: true
+      time: true,
+      kill_timeout: 5000
     },
     {
       name: 'phonedeploy-stats',
@@ -41,7 +42,8 @@ module.exports = {
       log_file: path.join(deployDir, 'logs', 'stats.log'),
       error_file: path.join(deployDir, 'logs', 'stats-error.log'),
       merge_logs: true,
-      time: true
+      time: true,
+      kill_timeout: 5000
     }
   ]
 };

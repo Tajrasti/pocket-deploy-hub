@@ -7,11 +7,11 @@ echo "=== PhoneDeploy Setup ==="
 echo "Setting up deployment server on postmarketOS..."
 
 # Update package list
-echo "[1/6] Updating packages..."
+echo "[1/7] Updating packages..."
 sudo apk update
 
 # Install required packages
-echo "[2/6] Installing dependencies..."
+echo "[2/7] Installing dependencies..."
 sudo apk add --no-cache \
     nodejs \
     npm \
@@ -22,11 +22,11 @@ sudo apk add --no-cache \
     openssl
 
 # Install PM2 globally
-echo "[3/6] Installing PM2 process manager..."
+echo "[3/7] Installing PM2 process manager..."
 sudo npm install -g pm2
 
 # Create directory structure
-echo "[4/6] Creating directories..."
+echo "[4/7] Creating directories..."
 DEPLOY_DIR="/home/$(whoami)/phonedeploy"
 mkdir -p "$DEPLOY_DIR/apps"
 mkdir -p "$DEPLOY_DIR/logs"
@@ -34,16 +34,23 @@ mkdir -p "$DEPLOY_DIR/config"
 mkdir -p "$DEPLOY_DIR/caddy"
 
 # Generate a webhook secret
-echo "[5/6] Generating webhook secret..."
+echo "[5/7] Generating webhook secret..."
 WEBHOOK_SECRET=$(openssl rand -hex 32)
 echo "$WEBHOOK_SECRET" > "$DEPLOY_DIR/config/webhook-secret.txt"
 echo "Webhook secret saved to $DEPLOY_DIR/config/webhook-secret.txt"
 
 # Create initial config
-echo "[6/6] Creating initial configuration..."
+echo "[6/7] Creating initial configuration..."
 cat > "$DEPLOY_DIR/config/apps.json" << 'EOF'
 {
   "apps": []
+}
+EOF
+
+cat > "$DEPLOY_DIR/config/ports.json" << 'EOF'
+{
+  "nextPort": 4000,
+  "allocated": {}
 }
 EOF
 
@@ -54,14 +61,64 @@ sudo cp "$DEPLOY_DIR/caddy/Caddyfile" /etc/caddy/Caddyfile 2>/dev/null || true
 # Enable Caddy service
 sudo rc-update add caddy default 2>/dev/null || true
 
+# Setup PM2 startup
+echo "[7/7] Configuring PM2 startup..."
+# Generate startup script for OpenRC
+pm2 startup openrc -u $(whoami) --hp /home/$(whoami) 2>/dev/null || true
+
+# Create a simple init script for PhoneDeploy
+INIT_SCRIPT="/etc/init.d/phonedeploy"
+sudo tee "$INIT_SCRIPT" > /dev/null << 'INITEOF'
+#!/sbin/openrc-run
+
+name="PhoneDeploy"
+description="PhoneDeploy Deployment Server"
+command="/usr/bin/pm2"
+command_args="resurrect"
+command_user="${RC_SVCNAME##*.}"
+pidfile="/run/${RC_SVCNAME}.pid"
+
+depend() {
+    need net
+    after firewall
+}
+
+start_pre() {
+    checkpath --directory --owner $(whoami) /run
+}
+
+start() {
+    ebegin "Starting PhoneDeploy services"
+    su - $(whoami) -c "cd /home/$(whoami)/phonedeploy && pm2 resurrect" || \
+    su - $(whoami) -c "cd /home/$(whoami)/phonedeploy && pm2 start ecosystem.config.cjs"
+    eend $?
+}
+
+stop() {
+    ebegin "Stopping PhoneDeploy services"
+    su - $(whoami) -c "pm2 kill"
+    eend $?
+}
+
+status() {
+    su - $(whoami) -c "pm2 list"
+}
+INITEOF
+
+# Make init script executable and enable it
+sudo chmod +x "$INIT_SCRIPT" 2>/dev/null || true
+sudo rc-update add phonedeploy default 2>/dev/null || true
+
 echo ""
 echo "=== Setup Complete ==="
 echo ""
 echo "Next steps:"
-echo "1. Configure your domain/IP in the Caddyfile"
-echo "2. Start services: pm2 start ecosystem.config.cjs"
-echo "3. Save PM2 config: pm2 save"
-echo "4. Setup PM2 startup: pm2 startup"
+echo "1. Copy all server-scripts files to $DEPLOY_DIR"
+echo "2. Make scripts executable: chmod +x $DEPLOY_DIR/*.sh"
+echo "3. Start services: cd $DEPLOY_DIR && pm2 start ecosystem.config.cjs"
+echo "4. Save PM2 state: pm2 save"
+echo ""
+echo "The services will auto-start on reboot!"
 echo ""
 echo "Webhook URL: http://YOUR_IP:3001/webhook"
 echo "Webhook Secret: $WEBHOOK_SECRET"

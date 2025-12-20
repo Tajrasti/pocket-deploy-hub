@@ -2,6 +2,7 @@ import http from 'http';
 import { readFileSync, existsSync } from 'fs';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import os from 'os';
 
 const execAsync = promisify(exec);
 const PORT = process.env.STATS_PORT || 3002;
@@ -27,10 +28,10 @@ async function getCpuUsage() {
     const total1 = stat1.reduce((a, b) => a + b, 0);
     const total2 = stat2.reduce((a, b) => a + b, 0);
 
-    // CPU usage %
-    const usage = (1 - (idle2 - idle1) / (total2 - total1)) * 13;
+    // CPU usage % (fixed: multiply by 100 not 13)
+    const usage = (1 - (idle2 - idle1) / (total2 - total1)) * 100;
 
-    return Math.round(usage);
+    return Math.round(Math.min(100, Math.max(0, usage)));
   } catch {
     return 0;
   }
@@ -49,12 +50,13 @@ function getMemoryInfo() {
     const total = getValue('MemTotal');
     const available = getValue('MemAvailable');
     const used = total - available;
-    return { total, used, available };
+    return { 
+      total: +(total.toFixed(1)), 
+      used: +(used.toFixed(1)), 
+      available: +(available.toFixed(1)) 
+    };
   } catch {
-    return {
-        total: +(total.toFixed(1)),
-        used: +(used.toFixed(1)),
-        available: +(available.toFixed(1))};
+    return { total: 0, used: 0, available: 0 };
   }
 }
 
@@ -73,7 +75,12 @@ async function getActiveApps() {
   try {
     const { stdout } = await execAsync('pm2 jlist');
     const apps = JSON.parse(stdout);
-    return apps.filter(a => a.pm2_env.status === 'online').length;
+    // Exclude our own services from the count
+    const userApps = apps.filter(a => 
+      a.pm2_env.status === 'online' && 
+      !a.name.startsWith('phonedeploy-')
+    );
+    return userApps.length;
   } catch {
     return 0;
   }
@@ -83,7 +90,7 @@ async function getActiveApps() {
 async function getPm2Processes() {
   try {
     const { stdout } = await execAsync('pm2 jlist');
-    const cores = require('os').cpus().length;
+    const cores = os.cpus().length;
 
     return JSON.parse(stdout).map(p => {
       const cpu = p.monit?.cpu || 0; // PM2 reports CPU %
