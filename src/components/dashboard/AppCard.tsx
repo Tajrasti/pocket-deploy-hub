@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { GitBranch, ExternalLink, Play, Square, RotateCcw, Terminal, Trash2 } from "lucide-react";
+import { GitBranch, ExternalLink, Play, Square, RotateCcw, Terminal, Trash2, Settings, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "./StatusBadge";
 import type { App } from "@/types/deployment";
@@ -12,9 +12,11 @@ interface AppCardProps {
   onToggleApp: (app: App) => void;
   onRedeploy: (app: App) => void;
   onDelete: (app: App) => void;
+  onSettings: (app: App) => void;
+  onCancelBuild?: (app: App) => void;
 }
 
-export function AppCard({ app, index, onViewLogs, onToggleApp, onRedeploy, onDelete }: AppCardProps) {
+export function AppCard({ app, index, onViewLogs, onToggleApp, onRedeploy, onDelete, onSettings, onCancelBuild }: AppCardProps) {
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
@@ -36,14 +38,25 @@ export function AppCard({ app, index, onViewLogs, onToggleApp, onRedeploy, onDel
             <span className="text-primary/60">/{app.branch}</span>
           </div>
         </div>
-        <a
-          href={`http://${app.domain}`}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="p-2 rounded-md hover:bg-muted transition-colors text-muted-foreground hover:text-primary"
-        >
-          <ExternalLink className="w-4 h-4" />
-        </a>
+        <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => onSettings(app)}
+            className="text-muted-foreground hover:text-primary"
+            title="App settings"
+          >
+            <Settings className="w-4 h-4" />
+          </Button>
+          <a
+            href={`http://${app.domain}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="p-2 rounded-md hover:bg-muted transition-colors text-muted-foreground hover:text-primary"
+          >
+            <ExternalLink className="w-4 h-4" />
+          </a>
+        </div>
       </div>
 
       <div className="flex items-center gap-2 mb-4 text-xs">
@@ -63,23 +76,33 @@ export function AppCard({ app, index, onViewLogs, onToggleApp, onRedeploy, onDel
       </div>
 
       <div className="flex items-center gap-2">
-        <Button
-          variant="terminal"
-          size="sm"
-          onClick={() => onToggleApp(app)}
-          className="flex-1"
-          disabled={app.status === "building"}
-        >
-          {app.status === "running" ? (
-            <>
-              <Square className="w-3 h-3" /> Stop
-            </>
-          ) : (
-            <>
-              <Play className="w-3 h-3" /> Start
-            </>
-          )}
-        </Button>
+        {app.status === "building" ? (
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={() => onCancelBuild?.(app)}
+            className="flex-1"
+          >
+            <XCircle className="w-3 h-3" /> Cancel Build
+          </Button>
+        ) : (
+          <Button
+            variant="terminal"
+            size="sm"
+            onClick={() => onToggleApp(app)}
+            className="flex-1"
+          >
+            {app.status === "running" ? (
+              <>
+                <Square className="w-3 h-3" /> Stop
+              </>
+            ) : (
+              <>
+                <Play className="w-3 h-3" /> Start
+              </>
+            )}
+          </Button>
+        )}
         <Button
           variant="ghost"
           size="icon"

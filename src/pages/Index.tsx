@@ -6,6 +6,7 @@ import { SystemStats } from "@/components/dashboard/SystemStats";
 import { AppCard } from "@/components/dashboard/AppCard";
 import { TerminalLogs } from "@/components/dashboard/TerminalLogs";
 import { DeployModal, DeployConfig } from "@/components/dashboard/DeployModal";
+import { AppSettingsModal } from "@/components/dashboard/AppSettingsModal";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
@@ -40,6 +41,7 @@ export default function Index() {
   const [isDeployModalOpen, setIsDeployModalOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [deleteApp, setDeleteApp] = useState<App | null>(null);
+  const [settingsApp, setSettingsApp] = useState<App | null>(null);
 
   // Fetch apps from backend
   const fetchApps = useCallback(async () => {
@@ -164,6 +166,24 @@ export default function Index() {
     }
   };
 
+  const handleCancelBuild = async (app: App) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/apps/${app.id}/cancel`, {
+        method: "POST"
+      });
+      
+      if (res.ok) {
+        toast.success(`Build cancelled for ${app.name}`);
+        fetchApps();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        toast.error(data.error || `Failed to cancel build for ${app.name}`);
+      }
+    } catch (error) {
+      toast.error(`Failed to cancel build for ${app.name}`);
+    }
+  };
+
   const handleDeleteApp = async () => {
     if (!deleteApp) return;
     
@@ -184,6 +204,26 @@ export default function Index() {
       }
     } catch (error) {
       toast.error(`Failed to delete ${appName}`);
+    }
+  };
+
+  const handleSaveSettings = async (appId: string, updates: Partial<App>) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/apps/${appId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(updates)
+      });
+      
+      if (res.ok) {
+        toast.success("Settings saved successfully");
+        fetchApps();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        toast.error(data.error || "Failed to save settings");
+      }
+    } catch (error) {
+      toast.error("Failed to save settings");
     }
   };
 
@@ -289,6 +329,8 @@ export default function Index() {
                   onToggleApp={handleToggleApp}
                   onRedeploy={handleRedeploy}
                   onDelete={setDeleteApp}
+                  onSettings={setSettingsApp}
+                  onCancelBuild={handleCancelBuild}
                 />
               ))}
             </div>
@@ -326,6 +368,14 @@ export default function Index() {
         isOpen={isDeployModalOpen}
         onClose={() => setIsDeployModalOpen(false)}
         onDeploy={handleDeploy}
+      />
+
+      {/* App Settings Modal */}
+      <AppSettingsModal
+        app={settingsApp}
+        isOpen={!!settingsApp}
+        onClose={() => setSettingsApp(null)}
+        onSave={handleSaveSettings}
       />
 
       {/* Delete Confirmation Dialog */}
