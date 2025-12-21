@@ -4,7 +4,7 @@
  */
 
 const path = require('path');
-const deployDir = `/home/${whoami}/pocket-deploy-hub/server-scripts`;
+const deployDir = __dirname;
 
 module.exports = {
   apps: [
