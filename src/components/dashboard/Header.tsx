@@ -1,5 +1,6 @@
 import { motion } from "framer-motion";
 import { Smartphone, Plus, Settings, RefreshCw } from "lucide-react";
+import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 
 interface HeaderProps {
@@ -40,9 +41,11 @@ export function Header({ onNewDeploy, onRefresh }: HeaderProps) {
             <Button variant="ghost" size="icon" onClick={onRefresh}>
               <RefreshCw className="w-5 h-5" />
             </Button>
-            <Button variant="ghost" size="icon">
-              <Settings className="w-5 h-5" />
-            </Button>
+            <Link to="/settings">
+              <Button variant="ghost" size="icon">
+                <Settings className="w-5 h-5" />
+              </Button>
+            </Link>
             <Button variant="glow" onClick={onNewDeploy}>
               <Plus className="w-4 h-4" />
               Deploy
