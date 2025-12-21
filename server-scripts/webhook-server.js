@@ -235,103 +235,32 @@ function deployApp(app, callback) {
   });
 }
 
-// Stop an application - properly stops PM2 process and saves state
+// Stop an application
 function stopApp(appId) {
   return new Promise((resolve) => {
-    // First check if process exists in PM2
-    exec(`pm2 describe ${appId}`, (descError, stdout) => {
-      if (descError || !stdout || stdout.includes('doesnt exist')) {
-        // Process not in PM2, just update config
-        const config = loadConfig();
-        const idx = config.apps.findIndex(a => a.id === appId);
-        if (idx >= 0) {
-          config.apps[idx].status = 'stopped';
-          saveConfig(config);
-        }
-        return resolve(true);
+    exec(`pm2 stop ${appId} 2>/dev/null || true`, (error) => {
+      const config = loadConfig();
+      const idx = config.apps.findIndex(a => a.id === appId);
+      if (idx >= 0) {
+        config.apps[idx].status = 'stopped';
+        saveConfig(config);
       }
-      
-      // Stop the process in PM2
-      exec(`pm2 stop ${appId}`, (error) => {
-        const config = loadConfig();
-        const idx = config.apps.findIndex(a => a.id === appId);
-        if (idx >= 0) {
-          config.apps[idx].status = 'stopped';
-          saveConfig(config);
-        }
-        
-        // Save PM2 state so it persists across reboots
-        exec('pm2 save', () => {
-          resolve(!error);
-        });
-      });
+      resolve(!error);
     });
   });
 }
 
-// Start an application - properly starts PM2 process
+// Start an application
 function startApp(appId) {
   return new Promise((resolve) => {
-    const config = loadConfig();
-    const app = config.apps.find(a => a.id === appId);
-    
-    if (!app) {
-      return resolve(false);
-    }
-    
-    const appDir = join(APPS_DIR, appId);
-    
-    // Check if process exists in PM2
-    exec(`pm2 describe ${appId}`, (descError, stdout) => {
-      if (descError || !stdout || stdout.includes('doesnt exist')) {
-        // Process not in PM2, need to start fresh
-        // Check for static site (dist folder) vs dynamic app
-        const distDir = join(appDir, 'dist');
-        const buildDir = join(appDir, 'build');
-        const outDir = join(appDir, 'out');
-        
-        let startCmd;
-        let cwd = appDir;
-        
-        if (existsSync(distDir) || existsSync(buildDir) || existsSync(outDir)) {
-          // Static site - use serve
-          const serveDir = existsSync(distDir) ? 'dist' : existsSync(buildDir) ? 'build' : 'out';
-          startCmd = `pm2 start serve --name ${appId} -- -s ${serveDir} -l ${app.port}`;
-        } else {
-          // Dynamic app - use start command
-          const startCommand = app.startCommand || 'npm start';
-          startCmd = `pm2 start "${startCommand}" --name ${appId}`;
-        }
-        
-        exec(startCmd, { cwd }, (error) => {
-          const configNew = loadConfig();
-          const idx = configNew.apps.findIndex(a => a.id === appId);
-          if (idx >= 0) {
-            configNew.apps[idx].status = error ? 'error' : 'running';
-            saveConfig(configNew);
-          }
-          
-          // Save PM2 state
-          exec('pm2 save', () => {
-            resolve(!error);
-          });
-        });
-      } else {
-        // Process exists, just restart it
-        exec(`pm2 restart ${appId}`, (error) => {
-          const configNew = loadConfig();
-          const idx = configNew.apps.findIndex(a => a.id === appId);
-          if (idx >= 0) {
-            configNew.apps[idx].status = error ? 'error' : 'running';
-            saveConfig(configNew);
-          }
-          
-          // Save PM2 state
-          exec('pm2 save', () => {
-            resolve(!error);
-          });
-        });
+    exec(`pm2 start ${appId} 2>/dev/null || pm2 restart ${appId}`, (error) => {
+      const config = loadConfig();
+      const idx = config.apps.findIndex(a => a.id === appId);
+      if (idx >= 0) {
+        config.apps[idx].status = error ? 'error' : 'running';
+        saveConfig(config);
       }
+      resolve(!error);
     });
   });
 }
@@ -676,65 +605,6 @@ const server = http.createServer((req, res) => {
         webhookUrl: `http://${host}/webhook`,
         secretConfigured: !!getWebhookSecret()
       });
-    }
-    
-    // Settings API
-    const SETTINGS_FILE = join(DEPLOY_DIR, 'config', 'settings.json');
-    
-    // GET settings
-    if (path === '/api/settings' && req.method === 'GET') {
-      try {
-        if (existsSync(SETTINGS_FILE)) {
-          const settings = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'));
-          return sendJSON(res, 200, settings);
-        }
-        // Return defaults
-        return sendJSON(res, 200, {
-          baseDomain: BASE_DOMAIN,
-          webhookSecret: getWebhookSecret() || '',
-          autoRestart: true,
-          maxConcurrentBuilds: 2,
-          logRetentionDays: 7,
-          defaultBranch: 'main',
-          enableCaddy: true
-        });
-      } catch (e) {
-        console.error('Failed to read settings:', e);
-        return sendJSON(res, 500, { error: 'Failed to read settings' });
-      }
-    }
-    
-    // PUT settings
-    if (path === '/api/settings' && req.method === 'PUT') {
-      try {
-        const settings = JSON.parse(body);
-        writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
-        return sendJSON(res, 200, { message: 'Settings saved', settings });
-      } catch (e) {
-        console.error('Failed to save settings:', e);
-        return sendJSON(res, 500, { error: 'Failed to save settings' });
-      }
-    }
-    
-    // Regenerate webhook secret
-    if (path === '/api/settings/regenerate-secret' && req.method === 'POST') {
-      try {
-        const { randomBytes } = await import('crypto');
-        const secret = randomBytes(32).toString('hex');
-        writeFileSync(SECRET_FILE, secret);
-        
-        // Update settings file too
-        if (existsSync(SETTINGS_FILE)) {
-          const settings = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'));
-          settings.webhookSecret = secret;
-          writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
-        }
-        
-        return sendJSON(res, 200, { secret, message: 'Secret regenerated' });
-      } catch (e) {
-        console.error('Failed to regenerate secret:', e);
-        return sendJSON(res, 500, { error: 'Failed to regenerate secret' });
-      }
     }
     
     // Health check

@@ -4,29 +4,10 @@
  */
 
 const path = require('path');
-const os = require('os');
-const deployDir = `/home/${process.env.USER || os.userInfo().username}/phonedeploy`;
+const deployDir = `/home/${process.env.USER || 'user'}/phonedeploy`;
 
 module.exports = {
   apps: [
-    // Frontend Dashboard - served via 'serve'
-    {
-      name: 'phonedeploy-frontend',
-      script: 'serve',
-      args: ['-s', path.join(deployDir, 'frontend'), '-l', '3000'],
-      env: {
-        NODE_ENV: 'production'
-      },
-      watch: false,
-      autorestart: true,
-      max_restarts: 10,
-      restart_delay: 3000,
-      log_file: path.join(deployDir, 'logs', 'frontend.log'),
-      error_file: path.join(deployDir, 'logs', 'frontend-error.log'),
-      merge_logs: true,
-      time: true
-    },
-    // Webhook & API Server
     {
       name: 'phonedeploy-webhook',
       script: path.join(deployDir, 'webhook-server.js'),
@@ -46,7 +27,6 @@ module.exports = {
       time: true,
       kill_timeout: 5000
     },
-    // Stats Server
     {
       name: 'phonedeploy-stats',
       script: path.join(deployDir, 'stats-server.js'),
