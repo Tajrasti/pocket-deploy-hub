@@ -27,7 +27,7 @@ sudo npm install -g pm2
 
 # Create directory structure
 echo "[4/7] Creating directories..."
-DEPLOY_DIR="/home/$(whoami)/phonedeploy"
+DEPLOY_DIR="/home/$(whoami)/pocket-deploy-hub/server-scripts"
 mkdir -p "$DEPLOY_DIR/apps"
 mkdir -p "$DEPLOY_DIR/logs"
 mkdir -p "$DEPLOY_DIR/config"
@@ -67,7 +67,7 @@ echo "[7/7] Configuring PM2 startup..."
 pm2 startup openrc -u $(whoami) --hp /home/$(whoami) 2>/dev/null || true
 
 # Create a simple init script for PhoneDeploy
-INIT_SCRIPT="/etc/init.d/phonedeploy"
+INIT_SCRIPT="/etc/init.d/pocket-deploy-hub/server-scripts"
 sudo tee "$INIT_SCRIPT" > /dev/null << 'INITEOF'
 #!/sbin/openrc-run
 
@@ -89,8 +89,8 @@ start_pre() {
 
 start() {
     ebegin "Starting PhoneDeploy services"
-    su - $(whoami) -c "cd /home/$(whoami)/phonedeploy && pm2 resurrect" || \
-    su - $(whoami) -c "cd /home/$(whoami)/phonedeploy && pm2 start ecosystem.config.cjs"
+    su - $(whoami) -c "cd /home/$(whoami)/pocket-deploy-hub/server-scripts && pm2 resurrect" || \
+    su - $(whoami) -c "cd /home/$(whoami)/pocket-deploy-hub/server-scripts && pm2 start ecosystem.config.cjs"
     eend $?
 }
 
