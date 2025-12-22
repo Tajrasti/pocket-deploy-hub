@@ -4,19 +4,20 @@
  */
 
 import http from 'http';
-import { createHmac, timingSafeEqual } from 'crypto';
-import { spawn, exec } from 'child_process';
+import { createHmac, timingSafeEqual, randomBytes } from 'crypto';
+import { spawn, exec, execSync } from 'child_process';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, unlinkSync } from 'fs';
 import { join } from 'path';
+import { networkInterfaces } from 'os';
 
 const PORT = process.env.WEBHOOK_PORT || 3001;
 const DEPLOY_DIR = process.env.DEPLOY_DIR || `/home/${process.env.USER || 'user'}/phonedeploy`;
 const CONFIG_FILE = join(DEPLOY_DIR, 'config', 'apps.json');
 const PORTS_FILE = join(DEPLOY_DIR, 'config', 'ports.json');
 const SECRET_FILE = join(DEPLOY_DIR, 'config', 'webhook-secret.txt');
+const SETTINGS_FILE = join(DEPLOY_DIR, 'config', 'settings.json');
 const LOGS_DIR = join(DEPLOY_DIR, 'logs');
 const APPS_DIR = join(DEPLOY_DIR, 'apps');
-const BASE_DOMAIN = process.env.BASE_DOMAIN || ''; // e.g., 'myserver.local'
 
 // Track active build processes
 const activeBuilds = new Map();
@@ -25,6 +26,186 @@ const activeBuilds = new Map();
 [join(DEPLOY_DIR, 'config'), LOGS_DIR, APPS_DIR].forEach(dir => {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 });
+
+// Settings management
+function loadSettings() {
+  try {
+    if (!existsSync(SETTINGS_FILE)) {
+      const defaultSettings = {
+        baseDomain: '',
+        webhookSecret: getWebhookSecret() || '',
+        startPort: 4000,
+        enableHttps: false,
+        autoStartApps: true,
+        logRetentionDays: 7
+      };
+      writeFileSync(SETTINGS_FILE, JSON.stringify(defaultSettings, null, 2));
+      return defaultSettings;
+    }
+    return JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'));
+  } catch (e) {
+    console.error('Failed to load settings:', e);
+    return {
+      baseDomain: '',
+      webhookSecret: '',
+      startPort: 4000,
+      enableHttps: false,
+      autoStartApps: true,
+      logRetentionDays: 7
+    };
+  }
+}
+
+function saveSettings(settings) {
+  try {
+    writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
+    // Also update webhook secret file if changed
+    if (settings.webhookSecret) {
+      writeFileSync(SECRET_FILE, settings.webhookSecret);
+    }
+  } catch (e) {
+    console.error('Failed to save settings:', e);
+  }
+}
+
+function generateWebhookSecret() {
+  return randomBytes(32).toString('hex');
+}
+
+// Network management functions
+function getNetworkInterfaces() {
+  const interfaces = [];
+  const nets = networkInterfaces();
+  
+  for (const [name, netInfos] of Object.entries(nets)) {
+    if (name === 'lo') continue; // Skip loopback
+    
+    const info = netInfos?.find(n => n.family === 'IPv4');
+    const type = name.startsWith('wlan') || name.startsWith('wl') ? 'wifi' : 
+                 name.startsWith('eth') || name.startsWith('en') || name.startsWith('usb') ? 'ethernet' : 'other';
+    
+    interfaces.push({
+      name,
+      type,
+      status: info ? 'connected' : 'disconnected',
+      ip: info?.address,
+      mac: info?.mac || netInfos?.[0]?.mac,
+      ssid: type === 'wifi' ? getCurrentWifiSSID() : undefined,
+      signal: type === 'wifi' ? getWifiSignal() : undefined
+    });
+  }
+  
+  return interfaces;
+}
+
+function getCurrentWifiSSID() {
+  try {
+    const result = execSync('iwgetid -r 2>/dev/null || nmcli -t -f active,ssid dev wifi | grep "^yes" | cut -d: -f2 2>/dev/null || echo ""', { encoding: 'utf8' });
+    return result.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function getWifiSignal() {
+  try {
+    const result = execSync('iwconfig 2>/dev/null | grep -i quality | awk \'{print $2}\' | cut -d= -f2 | cut -d/ -f1', { encoding: 'utf8' });
+    const quality = parseInt(result.trim());
+    return isNaN(quality) ? undefined : Math.round((quality / 70) * 100);
+  } catch {
+    return undefined;
+  }
+}
+
+function scanWifiNetworks() {
+  return new Promise((resolve) => {
+    // Try nmcli first (NetworkManager)
+    exec('nmcli -t -f SSID,SIGNAL,SECURITY,ACTIVE dev wifi list 2>/dev/null', (error, stdout) => {
+      if (!error && stdout.trim()) {
+        const networks = stdout.trim().split('\n').filter(Boolean).map(line => {
+          const [ssid, signal, security, active] = line.split(':');
+          return {
+            ssid: ssid || 'Hidden Network',
+            signal: parseInt(signal) || 0,
+            security: security || 'Open',
+            connected: active === 'yes'
+          };
+        }).filter(n => n.ssid && n.ssid !== 'Hidden Network');
+        return resolve(networks);
+      }
+      
+      // Fallback to iwlist
+      exec('iwlist wlan0 scan 2>/dev/null | grep -E "ESSID|Quality|Encryption"', (err, out) => {
+        if (err || !out) return resolve([]);
+        
+        const networks = [];
+        const lines = out.split('\n');
+        let current = {};
+        
+        for (const line of lines) {
+          if (line.includes('ESSID:')) {
+            if (current.ssid) networks.push(current);
+            current = { ssid: line.match(/ESSID:"(.*)"/)?.[1] || '', signal: 0, security: 'Open', connected: false };
+          } else if (line.includes('Quality=')) {
+            const match = line.match(/Quality[=:](\d+)/);
+            current.signal = match ? Math.round((parseInt(match[1]) / 70) * 100) : 0;
+          } else if (line.includes('Encryption key:on')) {
+            current.security = 'WPA/WPA2';
+          }
+        }
+        if (current.ssid) networks.push(current);
+        
+        resolve(networks);
+      });
+    });
+  });
+}
+
+function connectToWifi(ssid, password) {
+  return new Promise((resolve, reject) => {
+    // Try nmcli first
+    exec(`nmcli dev wifi connect "${ssid}" password "${password}" 2>&1`, (error, stdout, stderr) => {
+      if (!error) {
+        return resolve({ success: true });
+      }
+      
+      // Fallback to wpa_supplicant
+      const wpaConfig = `
+network={
+    ssid="${ssid}"
+    psk="${password}"
+    key_mgmt=WPA-PSK
+}
+`;
+      try {
+        writeFileSync('/tmp/wpa_temp.conf', wpaConfig);
+        exec('wpa_supplicant -B -i wlan0 -c /tmp/wpa_temp.conf && dhclient wlan0', (err) => {
+          if (err) {
+            reject(new Error('Failed to connect to WiFi'));
+          } else {
+            resolve({ success: true });
+          }
+        });
+      } catch (e) {
+        reject(new Error('Failed to configure WiFi: ' + e.message));
+      }
+    });
+  });
+}
+
+function disconnectWifi() {
+  return new Promise((resolve) => {
+    exec('nmcli dev disconnect wlan0 2>/dev/null || killall wpa_supplicant 2>/dev/null', () => {
+      resolve({ success: true });
+    });
+  });
+}
+
+// Get BASE_DOMAIN from settings
+function getBaseDomain() {
+  const settings = loadSettings();
+  return settings.baseDomain || '';
+}
 
 // Port management
 function loadPorts() {
@@ -69,8 +250,9 @@ function releasePort(appId) {
 // Auto-generate domain from app name
 function generateDomain(appName) {
   const slug = appName.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
-  if (BASE_DOMAIN) {
-    return `${slug}.${BASE_DOMAIN}`;
+  const baseDomain = getBaseDomain();
+  if (baseDomain) {
+    return `${slug}.${baseDomain}`;
   }
   return `${slug}.localhost`;
 }
@@ -605,6 +787,70 @@ const server = http.createServer((req, res) => {
         webhookUrl: `http://${host}/webhook`,
         secretConfigured: !!getWebhookSecret()
       });
+    }
+    
+    // API: Get settings
+    if (path === '/api/settings' && req.method === 'GET') {
+      const settings = loadSettings();
+      return sendJSON(res, 200, settings);
+    }
+    
+    // API: Update settings
+    if (path === '/api/settings' && req.method === 'PUT') {
+      try {
+        const updates = JSON.parse(body);
+        const currentSettings = loadSettings();
+        const newSettings = { ...currentSettings, ...updates };
+        saveSettings(newSettings);
+        return sendJSON(res, 200, { message: 'Settings saved', settings: newSettings });
+      } catch (e) {
+        return sendJSON(res, 400, { error: 'Invalid request body' });
+      }
+    }
+    
+    // API: Generate new webhook secret
+    if (path === '/api/settings/generate-secret' && req.method === 'POST') {
+      const secret = generateWebhookSecret();
+      const settings = loadSettings();
+      settings.webhookSecret = secret;
+      saveSettings(settings);
+      return sendJSON(res, 200, { secret });
+    }
+    
+    // API: Get network interfaces
+    if (path === '/api/network/interfaces' && req.method === 'GET') {
+      const interfaces = getNetworkInterfaces();
+      return sendJSON(res, 200, interfaces);
+    }
+    
+    // API: Scan WiFi networks
+    if (path === '/api/network/wifi/scan' && req.method === 'POST') {
+      try {
+        const networks = await scanWifiNetworks();
+        return sendJSON(res, 200, networks);
+      } catch (e) {
+        return sendJSON(res, 500, { error: 'Failed to scan networks' });
+      }
+    }
+    
+    // API: Connect to WiFi
+    if (path === '/api/network/wifi/connect' && req.method === 'POST') {
+      try {
+        const { ssid, password } = JSON.parse(body);
+        if (!ssid || !password) {
+          return sendJSON(res, 400, { error: 'SSID and password are required' });
+        }
+        await connectToWifi(ssid, password);
+        return sendJSON(res, 200, { message: `Connected to ${ssid}` });
+      } catch (e) {
+        return sendJSON(res, 500, { error: e.message || 'Failed to connect' });
+      }
+    }
+    
+    // API: Disconnect from WiFi
+    if (path === '/api/network/wifi/disconnect' && req.method === 'POST') {
+      await disconnectWifi();
+      return sendJSON(res, 200, { message: 'Disconnected' });
     }
     
     // Health check
