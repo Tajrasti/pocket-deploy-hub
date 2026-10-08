@@ -33,7 +33,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3001";
+import { API_BASE } from "@/lib/api";
 
 interface NetworkInterface {
   name: string;
