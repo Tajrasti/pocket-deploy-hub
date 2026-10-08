@@ -1,49 +1,24 @@
-/**
- * PM2 Ecosystem Configuration
- * Manages all PhoneDeploy services
- */
-
+// PM2 config for PhoneDeploy itself. Deployed apps are added to PM2 by the server.
 const path = require('path');
-const deployDir = __dirname;
 
 module.exports = {
   apps: [
     {
-      name: 'phonedeploy-webhook',
-      script: path.join(deployDir, 'webhook-server.js'),
-      node_args: '--experimental-modules',
-      env: {
-        NODE_ENV: 'production',
-        WEBHOOK_PORT: 3001,
-        DEPLOY_DIR: deployDir
-      },
-      watch: false,
+      name: 'phonedeploy',
+      script: path.join(__dirname, 'server.js'),
+      cwd: __dirname,
+      env: { PORT: 3001 },
       autorestart: true,
-      max_restarts: 10,
-      restart_delay: 5000,
-      log_file: path.join(deployDir, 'logs', 'webhook.log'),
-      error_file: path.join(deployDir, 'logs', 'webhook-error.log'),
-      merge_logs: true,
+      restart_delay: 3000,
       time: true,
-      kill_timeout: 5000
     },
     {
-      name: 'phonedeploy-stats',
-      script: path.join(deployDir, 'stats-server.js'),
-      node_args: '--experimental-modules',
-      env: {
-        NODE_ENV: 'production',
-        STATS_PORT: 3002
-      },
-      watch: false,
+      name: 'phonedeploy-caddy',
+      script: 'caddy',
+      args: `run --config ${path.join(__dirname, 'caddy', 'Caddyfile')} --adapter caddyfile`,
+      interpreter: 'none',
       autorestart: true,
-      max_restarts: 10,
       restart_delay: 5000,
-      log_file: path.join(deployDir, 'logs', 'stats.log'),
-      error_file: path.join(deployDir, 'logs', 'stats-error.log'),
-      merge_logs: true,
-      time: true,
-      kill_timeout: 5000
-    }
-  ]
+    },
+  ],
 };

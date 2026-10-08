@@ -22,9 +22,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 
-// Configure your server IP/hostname here
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3001";
-const STATS_API = import.meta.env.VITE_STATS_URL || "http://localhost:3002";
+import { API_BASE } from "@/lib/api";
 
 export default function Index() {
   const [apps, setApps] = useState<App[]>([]);
@@ -65,7 +63,7 @@ export default function Index() {
   // Fetch system stats
   const fetchStats = useCallback(async () => {
     try {
-      const res = await fetch(`${STATS_API}/api/stats`);
+      const res = await fetch(`${API_BASE}/api/stats`);
       if (res.ok) {
         const data = await res.json();
         setStats({
