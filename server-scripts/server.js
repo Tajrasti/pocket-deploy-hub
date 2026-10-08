@@ -284,8 +284,6 @@ setInterval(() => {
 }, 2000).unref();
 
 async function getStats() {
-  const mem = readJSON('/dev/null', null) ?? null; // placeholder to keep shape simple
-  void mem;
   let total = os.totalmem(), avail = os.freemem();
   try {
     const m = fs.readFileSync('/proc/meminfo', 'utf8');
@@ -500,8 +498,8 @@ writeCaddyfile();
 pruneLogs();
 setInterval(pruneLogs, 6 * 3600000).unref();
 
-// PM2 "resurrect" restores running apps after reboot. If disabled, stop them.
-if (!getSettings().autoStartApps) {
+// PM2 "resurrect" restores running apps after reboot. If auto-start is off, stop them right after boot.
+if (!getSettings().autoStartApps && os.uptime() < 600) {
   for (const a of loadApps()) pm2('stop', a.id);
 }
 
